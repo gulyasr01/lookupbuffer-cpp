@@ -17,8 +17,13 @@ public:
     void insert(const Key& key, Value value) {
 		if (cancel.load(std::memory_order_acquire)) return;
 
-		std::lock_guard<mutex> lock(map_mut);
-		map[key] = move(value);
+		{
+			std::lock_guard<mutex> lock(map_mut);
+			if (cancel.load(std::memory_order_acquire)) return;
+
+			map[key] = move(value);
+		}
+		
 		map_cv.notify_all();
 	}
 
@@ -27,6 +32,8 @@ public:
     std::optional<Value> drop_select(
         const Key& key,
         std::chrono::milliseconds timeout) {
+			if (cancel.load(std::memory_order_acquire)) return std::nullopt;
+
 			auto deadline = std::chrono::steady_clock::now() + timeout;
 
 			std::unique_lock<mutex> lock(map_mut);
@@ -36,7 +43,7 @@ public:
 				return opt_val.value();
 			}
 
-			bool found = map_cv.wait_until(lock, deadline, [&] {
+			bool woke = map_cv.wait_until(lock, deadline, [&] {
 				if (cancel.load(std::memory_order_acquire)) return true;
 
 				auto it = map.find(key);
@@ -46,14 +53,18 @@ public:
 
 			if (cancel.load(std::memory_order_acquire)) return std::nullopt;
 
-			if (found == false) return std::nullopt;
+			if (woke == false) return std::nullopt;
 
 			return take(key);
 		}
 
     // Prevent further inserts and wake any waiting threads.
     void close() {
-		cancel.store(true, std::memory_order_release);
+		{
+			std::lock_guard lock(map_mut);
+			cancel.store(true, std::memory_order_release);
+		}
+
 		map_cv.notify_all();
 	}
 
@@ -76,7 +87,7 @@ private:
 	unordered_map<Key, Value> map;
 	mutex map_mut;
 	condition_variable map_cv;
-	std::atomic_bool cancel;
+	std::atomic_bool cancel{false};
 };
 
 
@@ -84,13 +95,19 @@ int main() {
 
 	LookupBuffer<int, int> buff{};
 
-	buff.insert(1, 2);
+	jthread([&]{
+		buff.insert(1, 2);
+	});
 	
-	auto rb = buff.drop_select(1, 500ms);
-	if (rb.has_value()) {
-		cout << "val: " << rb.value() << endl;	
-	}
+	jthread([&] {
+		sleep(1);
+		auto rb = buff.drop_select(1, 500ms);
+		if (rb.has_value()) {
+			cout << "val 1: " << rb.value() << endl;	
+		}
+	});
 
-	auto rb2 = buff.drop_select(5, 500ms);
 
+	auto rb = buff.drop_select(5, 500ms);
+	cout << "val 5: " << rb.has_value() << endl;
 }
