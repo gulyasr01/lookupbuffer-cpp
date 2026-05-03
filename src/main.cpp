@@ -68,12 +68,21 @@ public:
 		}
 
 		// 2. check if value exist, if so, take and return with it
-		if (entry->val.has_value()) {
-			auto retval = std::move(entry->val.value());
-			entry->val = std::nullopt;
-			map.erase(key);
-			return retval;
-		}
+		auto take = [&]() {
+			std::optional<Value> rv;
+			if (entry->val.has_value()) {
+				rv = std::move(entry->val.value());
+				entry->val = std::nullopt;
+				map.erase(key);
+			} else {
+				rv = std::nullopt;
+			}
+
+			return rv;
+		};
+
+		auto retval = take();
+		if (retval) return retval.value();
 
 		// 3. wait for the value to be present
 		entry->cv.wait_until(lock, deadline, [&] {
@@ -91,13 +100,8 @@ public:
 
 		if (cancel.load(std::memory_order_acquire)) return std::nullopt;
 
-		// todo: same cade as in 2, make it a lamda
-		if (entry->val.has_value()) {
-			auto retval = std::move(entry->val.value());
-			entry->val = std::nullopt;
-			map.erase(key);
-			return retval;
-		}
+		retval = take();
+		if (retval) return retval.value();
 
 		// 4. optional: cleanup to remove the key if nobody is waiting for it
 		cleanup();
@@ -129,16 +133,6 @@ private:
 		condition_variable cv;
 		std::size_t waiters{0};
 	};
-
-	std::optional<Entry> take(const Key& key) {
-		auto it = map.find(key);
-		if (it != map.end()) {
-			// get and return the value
-			auto node = map.extract(it);
-			return move(node.mapped());
-		}
-		return std::nullopt;
-	}
 
 	unordered_map<Key, std::shared_ptr<Entry>> map;
 	mutex map_mut;
