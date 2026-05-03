@@ -112,7 +112,7 @@ public:
 		cancel.store(true, std::memory_order_release);
 
 		for (const auto it : map) {
-			it->second->cv.notify_all();
+			it.second->cv.notify_all();
 		}
 	}
 
