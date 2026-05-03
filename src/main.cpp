@@ -17,14 +17,27 @@ public:
     void insert(const Key& key, Value value) {
 		if (cancel.load(std::memory_order_acquire)) return;
 
+		std::condition_variable * cv_ptr = nullptr;
+
 		{
 			std::lock_guard<mutex> lock(map_mut);
 			if (cancel.load(std::memory_order_acquire)) return;
 
-			map[key] = move(value);
+			auto it = map.find(key);
+			if (it == map.end()) {
+				// key not exist
+				auto entry = std::make_shared<Entry>();
+				entry->val = std::move(value);
+				map[key] = std::move(entry);
+
+			} else {
+				it->second->val = move(value);
+				cv_ptr = &it->second->cv;
+			}
 		}
-		
-		map_cv.notify_all();
+
+		// release lock before nitifying
+		if (cv_ptr) cv_ptr->notify_all();
 	}
 
     // Wait until a value for key is available, then remove and return it.
@@ -32,31 +45,65 @@ public:
     std::optional<Value> drop_select(
         const Key& key,
         std::chrono::milliseconds timeout) {
-			if (cancel.load(std::memory_order_acquire)) return std::nullopt;
+		if (cancel.load(std::memory_order_acquire)) return std::nullopt;
 
-			auto deadline = std::chrono::steady_clock::now() + timeout;
+		auto deadline = std::chrono::steady_clock::now() + timeout;
 
-			std::unique_lock<mutex> lock(map_mut);
-			// acces the hashmap
-			auto opt_val = take(key);
-			if (opt_val.has_value()) {
-				return opt_val.value();
+		std::shared_ptr<Entry> entry;
+
+		auto cleanup = [&]() {
+			if (entry && (--entry->waiters == 0) ) {
+				map.erase(key);
+			}
+		};
+
+		std::unique_lock<mutex> lock(map_mut);
+		// acces the hashmap
+		
+		// 1. load or create the key
+		entry = map[key];
+		if (!entry) {
+			entry = std::make_shared<Entry>();
+			entry->waiters++;
+		}
+
+		// 2. check if value exist, if so, take and return with it
+		if (entry->val.has_value()) {
+			auto retval = std::move(entry->val.value());
+			entry->val = std::nullopt;
+			map.erase(key);
+			return retval;
+		}
+
+		// 3. wait for the value to be present
+		entry->cv.wait_until(lock, deadline, [&] {
+			if (cancel.load(std::memory_order_acquire)) 
+			{
+				return true;
 			}
 
-			bool woke = map_cv.wait_until(lock, deadline, [&] {
-				if (cancel.load(std::memory_order_acquire)) return true;
+			if (entry->val.has_value()) {
+				return true;
+			} else {
+				return false;
+			}
+		});
 
-				auto it = map.find(key);
-				if (it == map.end()) return false;
-				else return true;
-			});
+		if (cancel.load(std::memory_order_acquire)) return std::nullopt;
 
-			if (cancel.load(std::memory_order_acquire)) return std::nullopt;
-
-			if (woke == false) return std::nullopt;
-
-			return take(key);
+		// todo: same cade as in 2, make it a lamda
+		if (entry->val.has_value()) {
+			auto retval = std::move(entry->val.value());
+			entry->val = std::nullopt;
+			map.erase(key);
+			return retval;
 		}
+
+		// 4. optional: cleanup to remove the key if nobody is waiting for it
+		cleanup();
+
+		return std::nullopt;
+	}
 
     // Prevent further inserts and wake any waiting threads.
     void close() {
@@ -65,7 +112,9 @@ public:
 			cancel.store(true, std::memory_order_release);
 		}
 
-		map_cv.notify_all();
+		for (const auto it : map) {
+			it->second->cv.notify_all();
+		}
 	}
 
     // Returns true if close() has been called.
@@ -74,7 +123,14 @@ public:
 	}
 
 private:
-	std::optional<Value> take(const Key& key) {
+	struct Entry
+	{
+		std::optional<Value> val;
+		condition_variable cv;
+		std::size_t waiters{0};
+	};
+
+	std::optional<Entry> take(const Key& key) {
 		auto it = map.find(key);
 		if (it != map.end()) {
 			// get and return the value
@@ -84,9 +140,8 @@ private:
 		return std::nullopt;
 	}
 
-	unordered_map<Key, Value> map;
+	unordered_map<Key, std::shared_ptr<Entry>> map;
 	mutex map_mut;
-	condition_variable map_cv;
 	std::atomic_bool cancel{false};
 };
 
