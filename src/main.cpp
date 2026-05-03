@@ -47,19 +47,11 @@ public:
 
 		auto deadline = std::chrono::steady_clock::now() + timeout;
 
-		std::shared_ptr<Entry> entry;
-
-		auto cleanup = [&]() {
-			if (entry && (--entry->waiters == 0) ) {
-				map.erase(key);
-			}
-		};
-
 		std::unique_lock<std::mutex> lock(map_mut);
 		// acces the hashmap
 		
 		// 1. load or create the key
-		entry = map[key];
+		auto & entry = map[key];
 		if (!entry) {
 			entry = std::make_shared<Entry>();
 			entry->waiters++;
@@ -102,6 +94,12 @@ public:
 		if (retval) return retval.value();
 
 		// 4. optional: cleanup to remove the key if nobody is waiting for it
+		auto cleanup = [&]() {
+			if (entry && (--entry->waiters == 0) ) {
+				map.erase(key);
+			}
+		};
+		
 		cleanup();
 
 		return std::nullopt;
