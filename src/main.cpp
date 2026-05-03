@@ -15,7 +15,7 @@ public:
     void insert(const Key& key, Value value) {
 		if (cancel.load(std::memory_order_acquire)) return;
 
-		std::condition_variable * cv_ptr = nullptr;
+		auto entry = std::make_shared<Entry>();
 
 		{
 			std::lock_guard<std::mutex> lock(map_mut);
@@ -24,18 +24,17 @@ public:
 			auto it = map.find(key);
 			if (it == map.end()) {
 				// key not exist
-				auto entry = std::make_shared<Entry>();
 				entry->val = std::move(value);
-				map[key] = std::move(entry);
+				map[key] = entry;
 
 			} else {
+				entry = it->second;
 				it->second->val = std::move(value);
-				cv_ptr = &it->second->cv;
 			}
 		}
 
 		// release lock before nitifying
-		if (cv_ptr) cv_ptr->notify_all();
+		entry->cv.notify_all();
 	}
 
     // Wait until a value for key is available, then remove and return it.
@@ -99,7 +98,7 @@ public:
 				map.erase(key);
 			}
 		};
-		
+
 		cleanup();
 
 		return std::nullopt;
