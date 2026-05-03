@@ -53,16 +53,22 @@ public:
 		auto & entry = map[key];
 		if (!entry) {
 			entry = std::make_shared<Entry>();
-			entry->waiters++;
 		}
+		entry->waiters++;
 
 		// 2. check if value exist, if so, take and return with it
+		auto cleanup = [&]() {
+			if (entry && (--entry->waiters == 0) ) {
+				map.erase(key);
+			}
+		};
+
 		auto take = [&]() {
 			std::optional<Value> rv;
 			if (entry->val.has_value()) {
 				rv = std::move(entry->val.value());
 				entry->val = std::nullopt;
-				map.erase(key);
+				cleanup();
 			} else {
 				rv = std::nullopt;
 			}
@@ -71,7 +77,7 @@ public:
 		};
 
 		auto retval = take();
-		if (retval) return retval.value();
+		if (retval) return retval;
 
 		// 3. wait for the value to be present
 		entry->cv.wait_until(lock, deadline, [&] {
@@ -87,18 +93,15 @@ public:
 			}
 		});
 
-		if (cancel.load(std::memory_order_acquire)) return std::nullopt;
+		if (cancel.load(std::memory_order_acquire)) {
+			cleanup();
+			return std::nullopt;
+		}
 
 		retval = take();
-		if (retval) return retval.value();
+		if (retval) return retval;
 
-		// 4. optional: cleanup to remove the key if nobody is waiting for it
-		auto cleanup = [&]() {
-			if (entry && (--entry->waiters == 0) ) {
-				map.erase(key);
-			}
-		};
-
+		// 4. cleanup to remove the key if nobody is waiting for it
 		cleanup();
 
 		return std::nullopt;
@@ -106,10 +109,8 @@ public:
 
     // Prevent further inserts and wake any waiting threads.
     void close() {
-		{
-			std::lock_guard lock(map_mut);
-			cancel.store(true, std::memory_order_release);
-		}
+		std::lock_guard lock(map_mut);
+		cancel.store(true, std::memory_order_release);
 
 		for (const auto it : map) {
 			it->second->cv.notify_all();
