@@ -8,8 +8,6 @@
 #include <atomic>
 #include <thread>
 
-using namespace std;
-
 template <typename Key, typename Value>
 class LookupBuffer {
 public:
@@ -20,7 +18,7 @@ public:
 		std::condition_variable * cv_ptr = nullptr;
 
 		{
-			std::lock_guard<mutex> lock(map_mut);
+			std::lock_guard<std::mutex> lock(map_mut);
 			if (cancel.load(std::memory_order_acquire)) return;
 
 			auto it = map.find(key);
@@ -31,7 +29,7 @@ public:
 				map[key] = std::move(entry);
 
 			} else {
-				it->second->val = move(value);
+				it->second->val = std::move(value);
 				cv_ptr = &it->second->cv;
 			}
 		}
@@ -57,7 +55,7 @@ public:
 			}
 		};
 
-		std::unique_lock<mutex> lock(map_mut);
+		std::unique_lock<std::mutex> lock(map_mut);
 		// acces the hashmap
 		
 		// 1. load or create the key
@@ -130,15 +128,16 @@ private:
 	struct Entry
 	{
 		std::optional<Value> val;
-		condition_variable cv;
+		std::condition_variable cv;
 		std::size_t waiters{0};
 	};
 
-	unordered_map<Key, std::shared_ptr<Entry>> map;
-	mutex map_mut;
+	std::unordered_map<Key, std::shared_ptr<Entry>> map;
+	std::mutex map_mut;
 	std::atomic_bool cancel{false};
 };
 
+using namespace std;
 
 int main() {
 
