@@ -34,7 +34,7 @@ public:
 		}
 
 		// release lock before nitifying
-		entry->cv.notify_all();
+		entry->cv.notify_one();
 	}
 
     // Wait until a value for key is available, then remove and return it.
