@@ -12,9 +12,7 @@ class LookupBuffer {
 public:
     // Insert or overwrite the value associated with key.
     void insert(const Key& key, Value value) {
-		if (cancel.load(std::memory_order_acquire)) return;
-
-		auto entry = std::make_shared<Entry>();
+		std::shared_ptr<Entry> entry;
 
 		{
 			std::lock_guard<std::mutex> lock(map_mut);
@@ -23,9 +21,9 @@ public:
 			auto it = map.find(key);
 			if (it == map.end()) {
 				// key not exist
+				entry = std::make_shared<Entry>();
 				entry->val = std::move(value);
 				map[key] = entry;
-
 			} else {
 				entry = it->second;
 				it->second->val = std::move(value);
