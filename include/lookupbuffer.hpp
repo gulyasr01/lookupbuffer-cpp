@@ -4,7 +4,6 @@
 #include <condition_variable>
 #include <mutex>
 #include <unordered_map>
-#include <atomic>
 #include <thread>
 
 template <typename Key, typename Value>
@@ -16,7 +15,7 @@ public:
 
 		{
 			std::lock_guard<std::mutex> lock(map_mut);
-			if (cancel.load(std::memory_order_acquire)) return;
+			if (cancel) return;
 
 			auto it = map.find(key);
 			if (it == map.end()) {
@@ -39,7 +38,6 @@ public:
     std::optional<Value> drop_select(
         const Key& key,
         std::chrono::milliseconds timeout) {
-		if (cancel.load(std::memory_order_acquire)) return std::nullopt;
 
 		auto deadline = std::chrono::steady_clock::now() + timeout;
 
@@ -78,7 +76,7 @@ public:
 
 		// 3. wait for the value to be present
 		entry->cv.wait_until(lock, deadline, [&] {
-			if (cancel.load(std::memory_order_acquire)) 
+			if (cancel) 
 			{
 				return true;
 			}
@@ -90,7 +88,7 @@ public:
 			}
 		});
 
-		if (cancel.load(std::memory_order_acquire)) {
+		if (cancel) {
 			cleanup();
 			return std::nullopt;
 		}
@@ -107,7 +105,7 @@ public:
     // Prevent further inserts and wake any waiting threads.
     void close() {
 		std::lock_guard lock(map_mut);
-		cancel.store(true, std::memory_order_release);
+		cancel = true;
 
 		for (const auto it : map) {
 			it.second->cv.notify_all();
@@ -116,7 +114,7 @@ public:
 
     // Returns true if close() has been called.
     bool closed() const {
-		return cancel.load(std::memory_order_acquire);
+		return cancel;
 	}
 
 private:
@@ -129,5 +127,5 @@ private:
 
 	std::unordered_map<Key, std::shared_ptr<Entry>> map;
 	std::mutex map_mut;
-	std::atomic_bool cancel{false};
+	bool cancel{false};
 };
